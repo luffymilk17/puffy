@@ -1,5 +1,3 @@
-from fastapi import FastAPI
+from .config import get_repo_root
 
-__all__ = ["app"]
-
-app = FastAPI(title="Puffy Coding Assistant", version="0.1.0")
+__all__ = ["get_repo_root"]

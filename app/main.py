@@ -1,0 +1,98 @@
+from __future__ import annotations
+
+from fastapi import FastAPI, HTTPException, Query
+from pydantic import BaseModel, Field
+
+from app.config import get_repo_root
+from app.llm import LLMClient, build_repo_context
+from app.repo_service import RepoService
+
+app = FastAPI(title="Puffy Coding Assistant", version="0.1.0")
+
+
+class WriteRequest(BaseModel):
+    path: str = Field(..., description="Relative path inside the repository")
+    content: str = Field(..., description="File content to write")
+
+
+class AgentRequest(BaseModel):
+    task: str = Field(..., description="What the assistant should do in the repo")
+    repo_path: str = Field(".", description="Relative repo path to inspect")
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/repo")
+def list_repo(path: str = Query(default=".")) -> dict[str, object]:
+    repo = RepoService(str(get_repo_root()))
+    try:
+        return {"path": path, "entries": repo.list_repo(path)}
+    except Exception as exc:  # pragma: no cover - defensive validation
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/repo/read")
+def read_repo_file(path: str = Query(..., description="Relative file path inside the repo")) -> dict[str, str]:
+    repo = RepoService(str(get_repo_root()))
+    try:
+        return {"path": path, "content": repo.read_file(path)}
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/repo/write")
+def write_repo_file(payload: WriteRequest) -> dict[str, str]:
+    repo = RepoService(str(get_repo_root()))
+    try:
+        written_path = repo.write_file(payload.path, payload.content)
+        return {"status": "written", "path": written_path}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/repo/status")
+def repo_status() -> dict[str, str]:
+    repo = RepoService(str(get_repo_root()))
+    return {"status": repo.get_git_status()}
+
+
+@app.get("/repo/diff")
+def repo_diff(path: str = Query(..., description="Relative file path inside the repo")) -> dict[str, str]:
+    repo = RepoService(str(get_repo_root()))
+    try:
+        return {"path": path, "diff": repo.get_diff_for_file(path)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/agent/run")
+def agent_run(payload: AgentRequest) -> dict[str, str]:
+    repo = RepoService(str(get_repo_root()))
+    try:
+        repo_context = build_repo_context(repo)
+    except Exception as exc:  # pragma: no cover - defensive validation
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    llm = LLMClient()
+    prompt = (
+        f"Repository task: {payload.task}\n"
+        f"Inspect path: {payload.repo_path}\n\n"
+        f"Context:\n{repo_context}"
+    )
+    system_prompt = (
+        "You are a careful repo-aware coding assistant. Keep suggestions concise, explain file-level changes, "
+        "and avoid writing secrets or credentials into code."
+    )
+    response = llm.ask(prompt, system_prompt=system_prompt)
+    return {"result": response}
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
